@@ -94,6 +94,8 @@ Queue<void, 8> inCharQ;
 Thread out_thread;
 Thread decode_thread;
 
+
+
 void sendSerial(){
     pc.baud(9600);
     while(true){
@@ -165,6 +167,16 @@ void ISR_serial(){
 
 }
 
+float velocity; //motor velocity
+float rotation; //motor rotation
+float tar_rotation_tmp = 0;
+float tar_velocity_tmp = 0;
+float tar_key_tmp = 0;
+float motor_position;
+char buffer[17];
+
+Mutex key_mutex;
+
 void decodeInput(){
     pc.attach(&ISR_serial);
     string cmd;
@@ -173,6 +185,34 @@ void decodeInput(){
         uint8_t *message = (uint8_t*)evt.value.p;
         cmd.append((char)*message);
         if((char)*message = "\r")
+        {
+             counter = 0;
+             buffer[counter] = "\0";
+             switch(buffer[0])
+             {
+               case 'R': //Rotation
+               sscanf(buffer, "R%f", &tar_rotation_tmp);
+               rotation = ((float)motor_position/6) + tar_rotation_tmp;
+               break;
+
+               case 'V': //Velocity
+               sscanf(buffer, "V%f", &tar_rotation_tmp);
+               velocity = (velocity == 0) ? 500 : velocity;
+               break;
+
+               case 'K': //Key
+               sscanf(buffer, "K%x", &tar_rotation_tmp);
+               tar_key_tmp = key;
+               break;
+
+               case 'T'://Tune
+               sscanf(buffer, "T%d", &tar_rotation_tmp);
+               break;
+             }
+        }else
+        {
+          counter++;
+        }
     }
 }
 
