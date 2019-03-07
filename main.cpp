@@ -65,33 +65,47 @@ DigitalOut L2H(L2Hpin);
 DigitalOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
+//Serial port
+RawSerial pc(SERIAL_TX, SERIAL_RX);
 //Timer
 Timer timer;
 
 //Mail
 typedef struct {
+    bool isNounce;
     uint64_t result;
+    int hashCount;
+
 } mail_t;
 
 Mail<mail_t, 16> mail_box;
 
-void putMessage(uint64_t result){
+void putMessage(bool isNounce, uint64_t result, int count){
     mail_t *mail = mail_box.alloc();
+    mail->isNounce = isNounce;
     mail->result = result;
+    mail->hashCount = count;
     mail_box.put(mail);
 }
 
+//Queue
+Queue<void, 8> inCharQ;
 //Threads
 Thread out_thread;
+Thread decode_thread;
 
 void sendSerial(){
-    Serial pc(SERIAL_TX, SERIAL_RX);
+    pc.baud(9600);
     while(true){
         osEvent evt = mail_box.get();
         if(evt.status == osEventMail){
             mail_t *mail = (mail_t*)evt.value.p;
-            pc.printf("Nonce found:");
-            pc.printf("%016llX\n\r", mail->result);
+            if(mail->isNounce){
+                pc.printf("Nonce found:");
+                pc.printf("%016llX\n\r", mail->result);
+            }else{
+                pc.printf("Hash count:%d\n\r", mail->hashCount);
+            }
             mail_box.free(mail);
         }
     }
@@ -143,12 +157,29 @@ void ISR_turn(){//check current state when the state changes and then drive moto
     }
 }
 
+//Incoming communication
 
+void ISR_serial(){
+    uint8_t newChar = pc.getc();
+    inCharQ.put((void*)newChar);
+
+}
+
+void decodeInput(){
+    pc.attach(&ISR_serial);
+    string cmd;
+    osEvent evt = inCharQ.get();
+    if (evt.status == osEventMessage) {
+        uint8_t *message = (uint8_t*)evt.value.p;
+        cmd.append((char)*message);
+        if((char)*message = "\r")
+    }
+}
 
 //Main
 int main() {
     //Initialise the serial port
-    RawSerial pc(SERIAL_TX, SERIAL_RX);  //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
+     //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
     pc.baud(9600);
     //pc.printf("Hello\n\r");
 
@@ -186,18 +217,19 @@ int main() {
     uint8_t hash[32];
 
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
-    int i = 0;
+    int hashCount = 0;
     timer.start();
     while (1) {
         (*nonce)++;
         h.computeHash(hash, sequence, 64);
-        i++;
+        hashCount++;
         if(hash[0] == hash[1] && hash[0] == 0)
-            putMessage(*nonce);
+            putMessage(true, *nonce, NULL);
             //pc.printf("%016llX\n", *nonce);
         if(timer.read() > 1){
-            pc.printf("hash count:%d\n\r",i);
-            i = 0;
+            putMessage(false, NULL, hashCount);
+            //pc.printf("hash count:%d\n\r",count);
+            hashCount = 0;
             timer.reset();
         }
     }
