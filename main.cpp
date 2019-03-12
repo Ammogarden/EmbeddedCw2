@@ -172,7 +172,7 @@ Mutex key_mutex;
 int counter;
 char buffer[17];
 volatile char cmdChar;
-uint64_t inKey;
+uint64_t newKey;
 uint64_t tar_rotation_tmp;
 bool new_key = false;
 volatile string newchar;
@@ -180,52 +180,44 @@ volatile string newchar;
 
 
 void decodeInput(){
+    uint64_t inKey = 0;
     pc.attach(&serialISR);
-    while(true)
-    {
-    osEvent evt = inCharQ.get();
+    while(true){
+        osEvent evt = inCharQ.get();
     
-    if (evt.status == osEventMessage) {
-        uint8_t newchar = (uint8_t)evt.value.p;
-        if(counter > 18)
-        {
-         counter = 0;
-        }else
-        {
-            buffer[counter] = newchar; 
-        }
-        //cmd.append((char*)message);
-         if(newchar == '\r'){
-            
-          buffer[counter] = '\0';
-         // Reset for the next command
-
+        if (evt.status == osEventMessage) {
+            uint8_t newchar = (uint8_t)evt.value.p;
+            if(counter > 17){
                 counter = 0;
-             }
+                //buffer[counter] = newchar;
+            }
+            else if (newchar!= '\r'){
+                buffer[counter] = newchar;
+                counter++;
+            }
+            else if(newchar == '\r'){
+                buffer[counter] = '\0';
+                 // Reset for the next command
+                counter = 0;
+            
              
-             switch(buffer[0]){
-                case 'K': //Key
-                    //putMessage(true, 0xffffffffffffffff, NULL);
-                    key_mutex.lock();
-                    //putMessage(true, 0xf0ffffffffffffff, NULL);
-                    sscanf(buffer, "K%x",&inKey); //TODO: inKey not get assigned
-                    pc.printf("%x",inKey);
-                    key_mutex.unlock();
-                    //putMessage(true, 0xf000ffffffffffff, NULL);
-                    new_key = 1;
-                    
-                    break;
+                switch(buffer[0]){
+                    case 'K': //Key
+                        sscanf(buffer, "K%llx",&inKey); //read 16 hex into inKey
+                        key_mutex.lock();
+                        newKey = inKey; //assigning global/shared variable, hence mutex
+                        key_mutex.unlock();
+                        break;
                                     
-                default:
-                    key_mutex.lock();
-                    sscanf(buffer, "K%x", &inKey);
-                    key_mutex.unlock();
-                    new_key = 1;          
-             }
+                    default:
+                        ;          
+                }
+            }
         }
         else{
-            counter++;
-        }
+            //counter++;
+            ;
+       }
     }
 }
 
@@ -238,7 +230,6 @@ int main() {
     //pc.printf("Hello\n\r");
     
     out_thread.start(sendSerial);
-    counter = 0;
     decode_thread.start(decodeInput);
     
     
@@ -276,7 +267,7 @@ int main() {
     timer.start();
     while (1) {
         key_mutex.lock(); 
-        *key = inKey;
+        *key = newKey;
         //putMessage(true, *key, NULL);
         key_mutex.unlock();
         (*nonce)++;
