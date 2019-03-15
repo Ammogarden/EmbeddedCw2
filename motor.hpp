@@ -51,6 +51,7 @@ const int8_t lead = 2;  //2 for forwards, -2 for backwards
 int8_t intState = 0;
 int8_t intStateOld = 0;
 int8_t orState = 0;    //Rotot offset at motor state 0
+
 //Status LED
 DigitalOut led1(LED1);
 
@@ -60,15 +61,19 @@ InterruptIn I2(I2pin);
 InterruptIn I3(I3pin);
 
 //Motor Drive outputs
-DigitalOut L1L(L1Lpin);
+PwmOut L1L(L1Lpin);
 DigitalOut L1H(L1Hpin);
-DigitalOut L2L(L2Lpin);
+PwmOut L2L(L2Lpin);
 DigitalOut L2H(L2Hpin);
-DigitalOut L3L(L3Lpin);
+PwmOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
 //Serial port
 RawSerial pc(SERIAL_TX, SERIAL_RX);
+
+volatile float newTorque;
+int32_t motorPos;
+Thread motorCtrlT(osPriorityNormal, 1024);
 
 //Set a given drive state
 void motorOut(int8_t driveState){
@@ -77,20 +82,22 @@ void motorOut(int8_t driveState){
     int8_t driveOut = driveTable[driveState & 0x07];
       
     //Turn off first
-    if (~driveOut & 0x01) L1L = 0;
+    if (~driveOut & 0x01) L1L.pulsewidth_us(0);
     if (~driveOut & 0x02) L1H = 1;
-    if (~driveOut & 0x04) L2L = 0;
+    if (~driveOut & 0x04) L2L.pulsewidth_us(0);
     if (~driveOut & 0x08) L2H = 1;
-    if (~driveOut & 0x10) L3L = 0;
+    if (~driveOut & 0x10) L3L.pulsewidth_us(0);
     if (~driveOut & 0x20) L3H = 1;
     
     //Then turn on
-    if (driveOut & 0x01) L1L = 1;
+    if (driveOut & 0x01) L1L.pulsewidth_us(newTorque);
     if (driveOut & 0x02) L1H = 0;
-    if (driveOut & 0x04) L2L = 1;
+    if (driveOut & 0x04) L2L.pulsewidth_us(newTorque);
     if (driveOut & 0x08) L2H = 0;
-    if (driveOut & 0x10) L3L = 1;
+    if (driveOut & 0x10) L3L.pulsewidth_us(newTorque);
     if (driveOut & 0x20) L3H = 0;
+    
+    pc.printf("%9.4f", newTorque);
 }
     
 //Convert photointerrupter inputs to a rotor state
@@ -109,10 +116,48 @@ int8_t motorHome() {
 }
 
 void ISR_turn(){//check current state when the state changes and then drive motor according to the difference
+
     intState = readRotorState();
+    
     if (intState != intStateOld) {
-        intStateOld = intState;
+
         motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+        if(intState - intStateOld == 5) motorPos--;
+        else if(intState - intStateOld == -5) motorPos++;
+        else motorPos += intState - intStateOld;
+        
+        intStateOld = intState;
         //pc.printf("%d\n\r",intState);
     }    
+}
+
+void motorCtrlTick(){
+    motorCtrlT.signal_set(0x1);
+}
+
+int curRotation;
+
+void motorCtrlFn(){
+    
+    Ticker motorCtrlTicker;
+    motorCtrlTicker.attach_us(&motorCtrlTick, 100000);
+    
+    Timer t;
+    t.start();
+    
+    int oldRotation = curRotation;
+    float timeDif;
+    float speed;
+    
+    while(1){
+        
+        motorCtrlT.signal_wait(0x1);
+        
+        timeDif = t.read();
+        t.reset();
+        
+        speed = 1.0f * (curRotation - oldRotation) / timeDif;
+        pc.printf("%9.6f", speed);
+        //do stuff
+    }
 }

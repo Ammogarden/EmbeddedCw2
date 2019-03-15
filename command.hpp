@@ -16,6 +16,7 @@ char buffer[17];
 
 volatile char cmdChar;
 volatile uint64_t newKey;
+
 uint64_t tar_rotation_tmp;
 bool new_key = false;
 volatile string newchar;
@@ -27,7 +28,10 @@ void serialISR(){
 }
 
 void decodeInput(){
+    
     uint64_t inKey = 0;
+    float inTorque = 0;
+    
     pc.attach(&serialISR);
     while(true){
         osEvent evt = inCharQ.get();
@@ -54,7 +58,11 @@ void decodeInput(){
                         newKey = inKey; //assigning global/shared variable, hence mutex
                         key_mutex.unlock();
                         break;
-                                    
+                                
+                    case 'T': //Torque
+                        sscanf(buffer, "T%f", &inTorque);
+                        newTorque = inTorque;
+                        break;    
                     default:
                         ;          
                 }

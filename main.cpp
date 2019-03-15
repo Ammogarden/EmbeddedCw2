@@ -10,9 +10,16 @@ Timer timer;
 //Threads for output and decode
 Thread out_thread;
 Thread decode_thread;
+
+PwmOut pwmControl(D9);
    
 //Main
 int main() {
+    
+    pwmControl.period_us(2);
+    pwmControl.write(0.5f);
+    
+    
     //Initialise the serial port
      //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
     pc.baud(9600);
@@ -20,6 +27,7 @@ int main() {
     
     out_thread.start(sendSerial);
     decode_thread.start(decodeInput);
+    motorCtrlT.start(motorCtrlFn);
     
     //Run the motor synchronisation
     orState = motorHome();
