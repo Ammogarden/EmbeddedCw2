@@ -84,17 +84,15 @@ Thread motorCtrlT(osPriorityNormal, 1024);
 //Timer for calculating velocity
 Timer vTimer;
 
-//Velocity control constants
-#define KPS 250
+//Velocity control constants, emperically determined optimal values
+//KPS testing with V50: 25->46, 20->48.3, 15->48.3 but faster convergence, below 15 will have overshoot
+#define KPS 15
 #define KIS 2
 
-//Rotation control constants
-#define KDR 20
-#define KPR 2
-
-//Emperically measured max and min rotation speed
-#define MAX_ROTSPEED 135
-#define MIN_ROTSPEED 10
+//Rotation control constants, emperically determined optimal values
+//KDR = 9, KPR = 7
+#define KDR 9
+#define KPR 7
 
 //Output torque
 float sTorque;
@@ -154,6 +152,7 @@ void ISR_turn(){//check current state when the state changes and then drive moto
         intStateOld = intState;
         
     }    
+        
 }
 
 //send back a signal 1 when triggered
@@ -173,6 +172,9 @@ void motorControlFn(){
     float velocityErr = 0;
     float dTime;
     
+    //To enhance speed control
+    float vIntegral = 0;
+    
     //Calculate rotation control
     float rotErr;
     float oldRotErr;
@@ -180,7 +182,6 @@ void motorControlFn(){
         
     int i = 0;
     int oldMotorPos = 0;
-    float pwmCycle;
     
     while(1){
         
@@ -197,51 +198,41 @@ void motorControlFn(){
         velocity = (motorPos - oldMotorPos) / dTime / 6;
         core_util_critical_section_exit();
         
-        //Calculate velocity error and speed controller output
-        velocityErr = inVelocity - abs(velocity);
-        sTorque = KPS * velocityErr;
-        
-        if(sTorque < 0) 
-            lead = -2;
-        else 
-            lead = 2;
-            
-        if(sTorque > MAX_ROTSPEED)
-            sTorque = MAX_ROTSPEED;
-        else if(sTorque < MIN_ROTSPEED)
-            sTorque = MIN_ROTSPEED;
-            
-        pwmCycle = sTorque / MAX_ROTSPEED;
-        
-            
-        pwmControl.write(pwmCycle);
-     /*       
         //Calculate rotation error and rotation controller output
+        //unit in revolutions
         rotErr = inRotation - motorPos / 6;
         dRotErr = (rotErr - oldRotErr) / dTime;
-        rTorque = KPR * rotErr + KDR * dRotErr;
+        rTorque = KPR * rotErr + KDR * dRotErr;  
+        
+        //Calculate velocity error and speed controller output
+        velocityErr = inVelocity - abs(velocity);
+        vIntegral += velocityErr * dTime;
+        sTorque = (KPS * velocityErr + KIS * vIntegral) * (rotErr > 0 ? 1 : -1); 
         
         //Choose output torque
         if(velocity >= 0)
             torque = min(rTorque, sTorque);
         else
             torque = max(rTorque, sTorque);
-       */     
-
+            
+        //Real velocity smaller than desired velocity
+        if(velocityErr > 0)
+            lead = 2;     
+        //Real velocity greater than desired velocity
+        else
+            lead = -2;   
+            
+        pwmControl.write(torque);
         
         if(++i == 10){
             pc.printf("Velocity: %f\n\r",velocity);
-            pc.printf("Motor Position: %d\n\r",motorPos);
+            pc.printf("Revolutions: %f\n\r", motorPos/6.0f);
+            pc.printf("%d\n\r", lead);
             i = 0;
         }
         
         oldRotErr = rotErr;
         oldMotorPos = motorPos;
-        
-        
 
     }
 }
-
-
-    
