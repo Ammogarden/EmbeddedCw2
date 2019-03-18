@@ -27,10 +27,10 @@ void sendSerial(){
         if(evt.status == osEventMail){
             mail_t *mail = (mail_t*)evt.value.p;
             if(mail->isNounce){
-                pc.printf("Nonce found:");
-                pc.printf("%016llX\n\r", mail->result);
+                //pc.printf("Nonce found:");
+                //pc.printf("%016llX\n\r", mail->result);
             }else{
-                pc.printf("Hash count:%d\n\r", mail->hashCount);
+                //pc.printf("Hash count:%d\n\r", mail->hashCount);
             }
             mail_box.free(mail);
         }

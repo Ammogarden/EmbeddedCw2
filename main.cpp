@@ -1,8 +1,8 @@
 #include "mbed.h"
 #include "SHA256.h"
+#include "command.hpp"
 #include "motor.hpp"
 #include "message.hpp"
-#include "command.hpp"
 
 //Timer
 Timer timer;
@@ -10,24 +10,23 @@ Timer timer;
 //Threads for output and decode
 Thread out_thread;
 Thread decode_thread;
-
-PwmOut pwmControl(D9);
    
 //Main
 int main() {
     
+    //Initialise PWM, defined in motor.hpp
     pwmControl.period_us(2);
     pwmControl.write(0.5f);
-    
     
     //Initialise the serial port
      //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
     pc.baud(9600);
     //pc.printf("Hello\n\r");
     
+    //Start threads for input, output and other tasks
     out_thread.start(sendSerial);
     decode_thread.start(decodeInput);
-    motorCtrlT.start(motorCtrlFn);
+    motorCtrlT.start(motorControlFn);
     
     //Run the motor synchronisation
     orState = motorHome();
