@@ -26,11 +26,11 @@
 
 //pid control constants
 #define kpr 15
-#define kdr 15
+#define kdr 18
 
-#define kpv 25
-#define kiv 10
-#define ivCAP 100
+#define kpv 30
+#define kiv 20
+#define ivCAP 50
 //note that the product/1000 is the duty cycle
 
 //maximum velocity for using increment encoder
@@ -124,18 +124,20 @@ typedef struct {
     int hashCount;
     float velocity;
     float position;
+    float dutyCycle;
     
 } mail_t;
 
 Mail<mail_t, 16> mail_box;
 
-void putMessage(char type, uint64_t result, int hashCount, float velocity, float position){
+void putMessage(char type, uint64_t result, int hashCount, float velocity, float position, float dutyCycle){
     mail_t *mail = mail_box.alloc();
     mail->type = type;
     mail->result = result;
     mail->hashCount = hashCount;
     mail->velocity = velocity;
     mail->position = position;
+    mail->dutyCycle = dutyCycle;
     mail_box.put(mail);
 }
 
@@ -163,6 +165,8 @@ void sendSerial(){
                 case 'm':
                     pc.printf("Velocity:%f\r\n", mail->velocity);
                     pc.printf("Position:%f\r\n", mail->position);
+                    //pc.printf("%f,", mail->dutyCycle);
+                    //pc.printf("%d\n\r", lead);
                     break;
                 default:
                     pc.printf("error\n\r");
@@ -237,19 +241,20 @@ void serialISR(){
 
 //Increment Encoder
 
-void ISR_incre(){ //CHA/B  00 -> 10 -> 11 -> 01 or inversed
+void ISR_incre(){//use increment encoder to read current rotation in higher precision
     /*
     int increTable[] = {0, 3, 1, 2};    
     */
     int currentState = increTable[CHA*2 + CHB];
-    if(currentState - previousMicroRotateState == -3){ //3->0, clockwise?
+    //CHA/B  00 -> 10 -> 11 -> 01 or inversed
+    if(currentState - previousMicroRotateState == -3){ //3->0, the sequence is 0->1->2->3->0, anticlockwise
         microRotate++;
     }
-    else if(currentState - previousMicroRotateState == 3){
+    else if(currentState - previousMicroRotateState == 3){//0->3, the sequence is 3->2->1->0->3, clockwise
         microRotate--;
     }
     else{
-        microRotate += (currentState - previousMicroRotateState); 
+        microRotate += (currentState - previousMicroRotateState);//other wise the difference can only be +-1
     }
     previousMicroRotateState = currentState;
 }
@@ -287,14 +292,14 @@ void decodeInput(){
                         break;
                     
                     case 'V': //Velocity
-                        sscanf(buffer, "V%f", &inVelocity);
+                        sscanf(buffer, "V%f", &inVelocity); //set target velocity
                         velocity_mutex.lock();
                         setVelocity = inVelocity;
                         velocity_mutex.unlock();
                         break;
                     
                     case 'R':
-                        sscanf(buffer, "R%f", &inRotation);
+                        sscanf(buffer, "R%f", &inRotation); //set target position
                         rotation_mutex.lock();
                         setRotation = inRotation;
                         rotation_mutex.unlock();               
@@ -307,14 +312,14 @@ void decodeInput(){
 }
 
 //Motor
-void motorCtrlTick(){
+void motorCtrlTick(){ //a function called every 100ms to release the thread
     motor_thread.signal_set(0x1);
 }
 
 
 
 void motorCtrlFn(){
-    int previousRotateNum = 0;
+    float previousRotateNum = 0;
     float velocity = 0;
     float timeInterval = 0;
     int iterationCount = 0;
@@ -337,12 +342,12 @@ void motorCtrlFn(){
     
     while(true){
         rotationTimer.start();
-        motor_thread.signal_wait(0x1);
+        motor_thread.signal_wait(0x1); //thread blocked until received signal
         rotationTimer.stop(); 
         timeInterval = rotationTimer.read();//get the actual time interval
         rotationTimer.reset();
         core_util_critical_section_enter();
-        currentRotation = (float)motorRotateNum/6.0 + (float)microRotate/1112;
+        currentRotation = (float)motorRotateNum/6.0 + (float)microRotate/1112; //in one rotation, photon interruptor increments 6 times, increment encoder increments 1112 
         core_util_critical_section_exit();
         velocity = (currentRotation - previousRotateNum)/timeInterval;
         previousRotateNum = currentRotation;
@@ -388,7 +393,6 @@ void motorCtrlFn(){
         }
         
         
-        
         if(torqueRotation >= 0){
             lead = 2;
             rotateDutyCycle = torqueRotation/1000; 
@@ -399,26 +403,49 @@ void motorCtrlFn(){
             rotateDutyCycle = -torqueRotation/1000;
             rotateDutyCycle = (rotateDutyCycle > 1)?1:rotateDutyCycle;
         }
-
         
-        if(lead == 2){
-            if(rotationError > 0.1){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
-                rotateDutyCycle = (rotateDutyCycle < 0.7)?0.7f:rotateDutyCycle;
+                
+//the PD rotation controller is overdamped very "conservative", which means it tends to stop the motor before it reach the target
+//here i use different floor values for differnet rotationError, hence the motor will not get stuck until it is close enough to the target
+
+        if(lead == 2 && setRotation > 0){ //for rotating anticlockwise
+            if(rotationError > 0.1){ 
+                rotateDutyCycle = (rotateDutyCycle < 0.8)?0.8f:rotateDutyCycle; //from experiments, duty cycle of 0.8 generate just about the same torque as friction
             }
-            if(rotationError > setRotation/100){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
-                rotateDutyCycle = (rotateDutyCycle < 0.8)?0.8f:rotateDutyCycle;
+            if(rotationError > setRotation/200){ //set duty cycle to 0.85 to prevent motor get stucked by friction
+                rotateDutyCycle = (rotateDutyCycle < 0.85)?0.85f:rotateDutyCycle;
             }
-            if(rotationError > setRotation/50){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
-                rotateDutyCycle = (rotateDutyCycle < 0.9)?0.9f:rotateDutyCycle;
+            if(rotationError > setRotation/50){ 
+                rotateDutyCycle = (rotateDutyCycle < 0.95)?0.95f:rotateDutyCycle;
             }
         }
-
+        
+        if(lead == -2 && setRotation < 0){ //this one is for rotating clockwise
+            if(rotationError < -0.1){ 
+                rotateDutyCycle = (rotateDutyCycle < 0.8)?0.8f:rotateDutyCycle;
+            }
+            if(rotationError < setRotation/200){ 
+                rotateDutyCycle = (rotateDutyCycle < 0.85)?0.85f:rotateDutyCycle;
+            }
+            if(rotationError < setRotation/50){ 
+                rotateDutyCycle = (rotateDutyCycle < 0.95)?0.95f:rotateDutyCycle;
+            }
+        }
+        
+        if(setRotation == 0){ //special case when R = 0
+            lead = 2;
+            rotateDutyCycle = 1; //jsut let it rotate forever
+        }
+        
+        if(setVelocity == 0){ //special case when V = 0
+            velocityDutyCycle = 1; //remove the software limit, let the motor rotate as fast as it can
+        }
 
         dutyCycle = (rotateDutyCycle < velocityDutyCycle)?rotateDutyCycle:velocityDutyCycle; //always choose "conservative"
         pwm.write(dutyCycle);
         iterationCount++;
         if(iterationCount >= 10){ //output velocity and current position every 1 sec
-            putMessage('m',NULL,NULL,velocity,currentRotation);
+            putMessage('m',NULL,NULL,velocity,currentRotation, dutyCycle);
             iterationCount = 0;
         }
         
@@ -432,20 +459,18 @@ void motorCtrlFn(){
 //Main
 int main() {
     //Initialise the serial port
-     //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
     pc.baud(9600);
-    //pc.printf("Hello\n\r");
 
-    
+    //starting threads
     out_thread.start(sendSerial);
     decode_thread.start(decodeInput);
     motor_thread.start(motorCtrlFn);
     
-    //
+
     //Run the motor synchronisation
     orState = motorHome();
     previousMicroRotateState = CHA.read()*2+CHB.read();
-    //pc.printf("Rotor origin: %x\n\r",orState);
+ 
     //orState is subtracted from future rotor state inputs to align rotor and motor states
     //attach ISR to each pin's rising and falling edge
     I1.rise(&ISR_turn);
@@ -455,11 +480,12 @@ int main() {
     I2.fall(&ISR_turn);
     I3.fall(&ISR_turn);
     
-    //Incre ISR
+    //attach ISR to each increment encoder's rising and falling edge
     CHA.rise(&ISR_incre);
     CHA.fall(&ISR_incre);
     CHB.rise(&ISR_incre);
-    CHB.fall(&ISR_incre);    
+    CHB.fall(&ISR_incre);
+        
     //declare SHA256 instance
     SHA256 h;
     //256 bits are 64 bytes
@@ -482,17 +508,14 @@ int main() {
     while (1) {
         key_mutex.lock(); 
         *key = newKey;
-        //putMessage(true, *key, NULL);
         key_mutex.unlock();
         (*nonce)++;
         h.computeHash(hash, sequence, 64);
         hashCount++;
-        if(hash[0] == hash[1] && hash[0] == 0)
-            putMessage('n', *nonce, NULL, NULL, NULL);
-            //pc.printf("%016llX\n", *nonce);
+        if(hash[0] == hash[1] && hash[0] == 0) //desired hash value
+            putMessage('n', *nonce, NULL, NULL, NULL, NULL); //send nonce found
         if(timer.read() > 1){
-            putMessage('h', NULL, hashCount, NULL, NULL);
-            //pc.printf("hash count:%d\n\r",count);
+            putMessage('h', NULL, hashCount, NULL, NULL, NULL); //send how many hash compution is made during 1 sec
             hashCount = 0;
             timer.reset();
         }

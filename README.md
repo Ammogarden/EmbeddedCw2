@@ -1,1 +1,1 @@
-# EmbeddedCw2
+CW2 for embedded systems
