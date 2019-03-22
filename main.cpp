@@ -24,6 +24,17 @@
 #define MCSPpin   A1
 #define MCSNpin   A0
 
+//pid control constants
+#define kpr 15
+#define kdr 15
+
+#define kpv 25
+#define kiv 10
+#define ivCAP 100
+//note that the product/1000 is the duty cycle
+
+//maximum velocity for using increment encoder
+#define MIN_VELOCITY_IE 40
 //Mapping from sequential drive states to motor phase outputs
 /*
 State   L1  L2  L3
@@ -44,12 +55,40 @@ const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //const int8_t stateMap[] = {0x07,0x01,0x03,0x02,0x05,0x00,0x04,0x07}; //Alternative if phase order of input or drive is reversed
 
 //Phase lead to make motor spin
-const int8_t lead = 2;  //2 for forwards, -2 for backwards
+int8_t lead = 2;  //2 for forwards, -2 for backwards
 
 //motor's state, we made it global but is there a bette way?
 int8_t intState = 0;
 int8_t intStateOld = 0;
-int8_t orState = 0;    //Rotot offset at motor state 0
+int8_t orState = 0x5;    //Rotot offset at motor state 0
+
+//position, rotation, velocity
+int motorRotateNum = 0; // number of rotation times 6
+
+int microRotate = 0;
+int increTable[] = {0, 3, 1, 2};
+int previousMicroRotateState = 0;
+
+
+//global variables
+
+//setting key
+Mutex key_mutex;
+int counter;
+char buffer[17];
+volatile char cmdChar;
+uint64_t newKey;
+uint64_t tar_rotation_tmp;
+bool new_key = false;
+volatile string newchar;
+
+//setting velocity
+float setVelocity = 50; //random initial value, range should be 0 - around 120
+Mutex velocity_mutex;
+
+float setRotation = 2000;
+Mutex rotation_mutex;
+
 //Status LED
 DigitalOut led1(LED1);
 
@@ -57,6 +96,10 @@ DigitalOut led1(LED1);
 InterruptIn I1(I1pin);
 InterruptIn I2(I2pin);
 InterruptIn I3(I3pin);
+
+//Incremental encoder input
+InterruptIn CHA(CHApin);
+InterruptIn CHB(CHBpin);
 
 //Motor Drive outputs
 DigitalOut L1L(L1Lpin);
@@ -66,26 +109,33 @@ DigitalOut L2H(L2Hpin);
 DigitalOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
+//PWM output
+PwmOut pwm(PWMpin);
+
 //Serial port
 RawSerial pc(SERIAL_TX, SERIAL_RX);
 //Timer
 Timer timer;
-
+Timer rotationTimer;
 //Mail
 typedef struct {
-    bool isNounce;
+    char type; //n:nonce h:hashCount m:motor
     uint64_t result;
     int hashCount;
+    float velocity;
+    float position;
     
 } mail_t;
 
 Mail<mail_t, 16> mail_box;
 
-void putMessage(bool isNounce, uint64_t result, int count){
+void putMessage(char type, uint64_t result, int hashCount, float velocity, float position){
     mail_t *mail = mail_box.alloc();
-    mail->isNounce = isNounce;
+    mail->type = type;
     mail->result = result;
-    mail->hashCount = count;
+    mail->hashCount = hashCount;
+    mail->velocity = velocity;
+    mail->position = position;
     mail_box.put(mail);
 }
 
@@ -94,6 +144,7 @@ Queue<void, 8> inCharQ;
 //Threads
 Thread out_thread;
 Thread decode_thread;
+Thread motor_thread(osPriorityNormal,1024);
 
 void sendSerial(){
     pc.baud(9600);
@@ -101,12 +152,23 @@ void sendSerial(){
         osEvent evt = mail_box.get();
         if(evt.status == osEventMail){
             mail_t *mail = (mail_t*)evt.value.p;
-            if(mail->isNounce){
-                pc.printf("Nonce found:");
-                pc.printf("%016llX\n\r", mail->result);
-            }else{
-                pc.printf("Hash count:%d\n\r", mail->hashCount);
+            switch(mail->type){
+                case 'n':
+                    pc.printf("Nonce found:");
+                    pc.printf("%016llX\n\r", mail->result);
+                    break;
+                case 'h':
+                    pc.printf("Hash count:%d\n\r", mail->hashCount);
+                    break;
+                case 'm':
+                    pc.printf("Velocity:%f\r\n", mail->velocity);
+                    pc.printf("Position:%f\r\n", mail->position);
+                    break;
+                default:
+                    pc.printf("error\n\r");
+                    
             }
+            
             mail_box.free(mail);
         }
     }
@@ -143,6 +205,7 @@ inline int8_t readRotorState(){
 //Basic synchronisation routine    
 int8_t motorHome() {
     //Put the motor in drive state 0 and wait for it to stabilise
+    pwm.write(1.0f);
     motorOut(0);
     wait(2.0);
     
@@ -150,11 +213,18 @@ int8_t motorHome() {
     return readRotorState();
 }
 void ISR_turn(){//check current state when the state changes and then drive motor according to the difference
+    microRotate = 0;
     intState = readRotorState();
     if (intState != intStateOld) {
-        intStateOld = intState;
         motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-        //pc.printf("%d\n\r",intState);
+        if(intState - intStateOld == 5) //current 5, previous 0, the sequence is 0->5->4->..... anti-clockwise
+            motorRotateNum--;
+        else if(intState - intStateOld == -5)//current0, previous 5, 4->5->0->1.... clockwise
+            motorRotateNum++;
+        else //then the difference can only be +-1
+            motorRotateNum += (intState - intStateOld);
+        
+        intStateOld = intState;
     }    
 }
 
@@ -165,22 +235,30 @@ void serialISR(){
     inCharQ.put((void*)newChar);
 }
 
+//Increment Encoder
 
-
-
-Mutex key_mutex;
-int counter;
-char buffer[17];
-volatile char cmdChar;
-uint64_t newKey;
-uint64_t tar_rotation_tmp;
-bool new_key = false;
-volatile string newchar;
-
+void ISR_incre(){ //CHA/B  00 -> 10 -> 11 -> 01 or inversed
+    /*
+    int increTable[] = {0, 3, 1, 2};    
+    */
+    int currentState = increTable[CHA*2 + CHB];
+    if(currentState - previousMicroRotateState == -3){ //3->0, clockwise?
+        microRotate++;
+    }
+    else if(currentState - previousMicroRotateState == 3){
+        microRotate--;
+    }
+    else{
+        microRotate += (currentState - previousMicroRotateState); 
+    }
+    previousMicroRotateState = currentState;
+}
 
 
 void decodeInput(){
     uint64_t inKey = 0;
+    float inVelocity = 0;
+    float inRotation = 0;
     pc.attach(&serialISR);
     while(true){
         osEvent evt = inCharQ.get();
@@ -189,7 +267,6 @@ void decodeInput(){
             uint8_t newchar = (uint8_t)evt.value.p;
             if(counter > 17){
                 counter = 0;
-                //buffer[counter] = newchar;
             }
             else if (newchar!= '\r'){
                 buffer[counter] = newchar;
@@ -208,18 +285,148 @@ void decodeInput(){
                         newKey = inKey; //assigning global/shared variable, hence mutex
                         key_mutex.unlock();
                         break;
-                                    
+                    
+                    case 'V': //Velocity
+                        sscanf(buffer, "V%f", &inVelocity);
+                        velocity_mutex.lock();
+                        setVelocity = inVelocity;
+                        velocity_mutex.unlock();
+                        break;
+                    
+                    case 'R':
+                        sscanf(buffer, "R%f", &inRotation);
+                        rotation_mutex.lock();
+                        setRotation = inRotation;
+                        rotation_mutex.unlock();               
                     default:
                         ;          
                 }
             }
         }
-        else{
-            //counter++;
-            ;
-       }
     }
 }
+
+//Motor
+void motorCtrlTick(){
+    motor_thread.signal_set(0x1);
+}
+
+
+
+void motorCtrlFn(){
+    int previousRotateNum = 0;
+    float velocity = 0;
+    float timeInterval = 0;
+    int iterationCount = 0;
+    float currentRotation = 0;
+    float velocityError = 0;
+    float cumulativeVelocityError = 0;
+    float rotationError = 9;
+    float previousRotationError = 0;
+    float dirivativeRotationError = 0;
+    float torqueVelocity = 0;
+    float torqueRotation = 0;
+    float dutyCycle = 1.0; // has range 0 to 1
+    float rotateDutyCycle = 0.0;
+    float velocityDutyCycle = 0.0;
+    Ticker motorCtrlTicker;
+    motorCtrlTicker.attach_us(&motorCtrlTick, 100000);
+    
+    pwm.period(0.002f);
+    pwm.write(1.0f);
+    
+    while(true){
+        rotationTimer.start();
+        motor_thread.signal_wait(0x1);
+        rotationTimer.stop(); 
+        timeInterval = rotationTimer.read();//get the actual time interval
+        rotationTimer.reset();
+        core_util_critical_section_enter();
+        currentRotation = (float)motorRotateNum/6.0 + (float)microRotate/1112;
+        core_util_critical_section_exit();
+        velocity = (currentRotation - previousRotateNum)/timeInterval;
+        previousRotateNum = currentRotation;
+        
+        //As we calculate velocity here, increment encoder is switched here
+
+        
+        //velocity controller
+        velocity_mutex.lock();
+        velocityError = setVelocity - velocity; //get Es
+        velocity_mutex.unlock();
+        cumulativeVelocityError += velocityError * timeInterval; //intergral term
+        //cap intergral term
+        if(cumulativeVelocityError >= ivCAP) cumulativeVelocityError = ivCAP;
+        if(cumulativeVelocityError <= -ivCAP) cumulativeVelocityError = -ivCAP;
+        torqueVelocity = kpv * velocityError + kiv * cumulativeVelocityError;
+
+
+        //Position controller
+        rotation_mutex.lock();
+        rotationError = setRotation - currentRotation;
+        rotation_mutex.unlock();
+        dirivativeRotationError = (rotationError - previousRotationError)/timeInterval;
+        previousRotationError = rotationError;
+        torqueRotation = kpr * rotationError + kdr * dirivativeRotationError;
+        
+        //change sign of torqueVelocity
+        
+        if(dirivativeRotationError < 0){
+            torqueVelocity = -torqueVelocity;
+        }
+        
+        
+        if(torqueVelocity >= 0){
+            lead = 2;
+            velocityDutyCycle = torqueVelocity/1000; 
+            velocityDutyCycle = (velocityDutyCycle > 1)?1:velocityDutyCycle;
+        }
+        else{
+            lead = -2;
+            velocityDutyCycle = -torqueVelocity/1000;
+            velocityDutyCycle = (velocityDutyCycle > 1)?1:velocityDutyCycle;
+        }
+        
+        
+        
+        if(torqueRotation >= 0){
+            lead = 2;
+            rotateDutyCycle = torqueRotation/1000; 
+            rotateDutyCycle = (rotateDutyCycle > 1)?1:rotateDutyCycle;
+        }
+        else{
+            lead = -2;
+            rotateDutyCycle = -torqueRotation/1000;
+            rotateDutyCycle = (rotateDutyCycle > 1)?1:rotateDutyCycle;
+        }
+
+        
+        if(lead == 2){
+            if(rotationError > 0.1){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
+                rotateDutyCycle = (rotateDutyCycle < 0.7)?0.7f:rotateDutyCycle;
+            }
+            if(rotationError > setRotation/100){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
+                rotateDutyCycle = (rotateDutyCycle < 0.8)?0.8f:rotateDutyCycle;
+            }
+            if(rotationError > setRotation/50){ //setting min value of dutyCycle, preventing motor get stucked by friction before going close to target
+                rotateDutyCycle = (rotateDutyCycle < 0.9)?0.9f:rotateDutyCycle;
+            }
+        }
+
+
+        dutyCycle = (rotateDutyCycle < velocityDutyCycle)?rotateDutyCycle:velocityDutyCycle; //always choose "conservative"
+        pwm.write(dutyCycle);
+        iterationCount++;
+        if(iterationCount >= 10){ //output velocity and current position every 1 sec
+            putMessage('m',NULL,NULL,velocity,currentRotation);
+            iterationCount = 0;
+        }
+        
+    }
+}
+
+
+
 
    
 //Main
@@ -228,15 +435,16 @@ int main() {
      //TODO: check: should i still establish serial connection in main() given that there is a thread meant to use the serial port?
     pc.baud(9600);
     //pc.printf("Hello\n\r");
+
     
     out_thread.start(sendSerial);
     decode_thread.start(decodeInput);
-    
-    
+    motor_thread.start(motorCtrlFn);
     
     //
     //Run the motor synchronisation
     orState = motorHome();
+    previousMicroRotateState = CHA.read()*2+CHB.read();
     //pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
     //attach ISR to each pin's rising and falling edge
@@ -246,6 +454,12 @@ int main() {
     I1.fall(&ISR_turn);
     I2.fall(&ISR_turn);
     I3.fall(&ISR_turn);
+    
+    //Incre ISR
+    CHA.rise(&ISR_incre);
+    CHA.fall(&ISR_incre);
+    CHB.rise(&ISR_incre);
+    CHB.fall(&ISR_incre);    
     //declare SHA256 instance
     SHA256 h;
     //256 bits are 64 bytes
@@ -274,10 +488,10 @@ int main() {
         h.computeHash(hash, sequence, 64);
         hashCount++;
         if(hash[0] == hash[1] && hash[0] == 0)
-            putMessage(true, *nonce, NULL);
+            putMessage('n', *nonce, NULL, NULL, NULL);
             //pc.printf("%016llX\n", *nonce);
         if(timer.read() > 1){
-            putMessage(false, NULL, hashCount);
+            putMessage('h', NULL, hashCount, NULL, NULL);
             //pc.printf("hash count:%d\n\r",count);
             hashCount = 0;
             timer.reset();
