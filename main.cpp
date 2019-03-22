@@ -66,7 +66,7 @@ int8_t orState = 0x5;    //Rotot offset at motor state 0
 int motorRotateNum = 0; // number of rotation times 6
 
 int microRotate = 0;
-int increTable[] = {0, 3, 1, 2};
+int increTable[] = {0, 3, 1, 2}; //for mapping increment encoder value to state, CHA*2 + CHB
 int previousMicroRotateState = 0;
 
 
